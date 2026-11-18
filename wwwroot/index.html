@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PC Speaker">
+<meta name="theme-color" content="#0e0f13">
+<title>PC Speaker</title>
+<style>
+  :root {
+    --bg: #0e0f13; --panel: #181a21; --line: #2a2d38; --text: #eef0f6;
+    --muted: #8b90a0; --accent: #4ade80; --warn: #fbbf24; --bad: #f87171;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center;
+    padding: max(24px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  main { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 20px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 10px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.live { background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+  .dot.wait { background: var(--warn); }
+  #conn { color: var(--muted); font-size: 14px; font-weight: 400; margin-left: auto; }
+  #start { appearance: none; border: 0; width: 180px; height: 180px; border-radius: 50%; align-self: center;
+    margin: 12px 0; background: radial-gradient(circle at 50% 35%, #2b2f3b, #191b22); color: var(--text);
+    font: 600 18px/1.2 inherit; box-shadow: 0 0 0 2px var(--line), 0 12px 40px #0008; cursor: pointer; }
+  #start.on { box-shadow: 0 0 0 3px var(--accent), 0 0 40px #4ade8040; }
+  #start svg { display: block; margin: 0 auto 8px; width: 44px; height: 44px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px;
+    display: flex; flex-direction: column; gap: 16px; }
+  label.row { display: flex; flex-direction: column; gap: 8px; font-size: 14px; color: var(--muted); }
+  label.row span { display: flex; justify-content: space-between; }
+  label.row b { color: var(--text); font-weight: 500; }
+  input[type=range] { width: 100%; accent-color: var(--accent); height: 28px; }
+  .check { display: flex; gap: 12px; align-items: flex-start; font-size: 14px; color: var(--muted); }
+  .check input { width: 22px; height: 22px; accent-color: var(--accent); flex: none; margin: 0; }
+  .check b { color: var(--text); font-weight: 500; display: block; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; text-align: center; }
+  .stats div { font-size: 12px; color: var(--muted); }
+  .stats b { display: block; font-size: 17px; color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  #hint { font-size: 13px; color: var(--muted); text-align: center; margin: 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1><span class="dot" id="dot"></span>PC Speaker <span id="conn">not started</span></h1>
+
+  <button id="start">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M11 5 6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>
+    </svg>
+    <span id="startLabel">Tap to start</span>
+  </button>
+
+  <section class="panel">
+    <label class="row"><span>Volume <b id="volVal">100%</b></span>
+      <input id="vol" type="range" min="0" max="1.5" step="0.01" value="1"></label>
+    <label class="row"><span>Delay buffer <b id="delayVal">80 ms</b></span>
+      <input id="delay" type="range" min="30" max="250" step="10" value="80"></label>
+    <p id="hint">Lower = less lag. Raise it if you hear crackles.</p>
+  </section>
+
+  <section class="panel">
+    <label class="check"><input id="bg" type="checkbox">
+      <span><b>Keep playing when locked (experimental)</b>Adds some delay. Works on some iOS versions.</span></label>
+  </section>
+
+  <section class="stats">
+    <div><b id="sBuf">–</b>buffer ms</div>
+    <div><b id="sRate">–</b>kbps</div>
+    <div><b id="sUnder">0</b>gaps</div>
+    <div><b id="sDrop">0</b>skips</div>
+  </section>
+</main>
+
+<audio id="bgAudio" playsinline></audio>
+
+<script>
+const RATE = 48000;
+const $ = id => document.getElementById(id);
+
+let ctx = null, out = null, streamDest = null, ws = null;
+let nextTime = 0;
+let target = 0.08;
+let bytes = 0, gaps = 0, skips = 0;
+let started = false;
+
+function setConn(state, text) {
+  $('dot').className = 'dot ' + (state === 'live' ? 'live' : state === 'wait' ? 'wait' : '');
+  $('conn').textContent = text;
+}
+
+$('start').addEventListener('click', async () => {
+  if (!ctx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    try { ctx = new AC({ sampleRate: RATE, latencyHint: 'interactive' }); }
+    catch { ctx = new AC(); }
+    // iOS 17+: play through the speaker even with the silent switch on.
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
+    out = ctx.createGain();
+    out.gain.value = +$('vol').value;
+    route();
+    ctx.onstatechange = updateButton;
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({ title: 'PC Audio', artist: 'PC Speaker' });
+    }
+    started = true;
+    connect();
+  }
+  // Older iOS needs a sound started inside the tap to unlock audio.
+  const unlock = ctx.createBufferSource();
+  unlock.buffer = ctx.createBuffer(1, 1, RATE);
+  unlock.connect(ctx.destination);
+  unlock.start();
+  await ctx.resume();
+  if ($('bg').checked) $('bgAudio').play().catch(() => {});
+  nextTime = 0;
+  updateButton();
+});
+
+function updateButton() {
+  const on = ctx && ctx.state === 'running';
+  $('start').classList.toggle('on', !!on);
+  $('startLabel').textContent = !ctx ? 'Tap to start' : on ? 'Playing' : 'Tap to resume';
+}
+
+function route() {
+  if (!out) return;
+  out.disconnect();
+  const el = $('bgAudio');
+  if ($('bg').checked) {
+    // Playing through a media element lets iOS treat this like music,
+    // which can keep it going in the background.
+    streamDest = streamDest || ctx.createMediaStreamDestination();
+    out.connect(streamDest);
+    el.srcObject = streamDest.stream;
+    el.play().catch(() => {});
+  } else {
+    out.connect(ctx.destination);
+    el.pause();
+    el.srcObject = null;
+  }
+}
+
+function connect() {
+  setConn('wait', 'connecting…');
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { setConn('live', 'live'); nextTime = 0; };
+  ws.onmessage = e => { if (typeof e.data !== 'string') play(e.data); };
+  ws.onclose = () => {
+    setConn('wait', 'reconnecting…');
+    setTimeout(connect, 1000);
+  };
+}
+
+function play(data) {
+  bytes += data.byteLength;
+  if (!ctx || ctx.state !== 'running') { nextTime = 0; return; }
+
+  const now = ctx.currentTime;
+  const ahead = nextTime - now;
+  if (ahead < 0.003) {
+    // Ran dry (Wi-Fi hiccup or first frame): start a fresh buffer.
+    if (nextTime) gaps++;
+    nextTime = now + target;
+  } else if (ahead > target + 0.05) {
+    // Too far behind real time: skip a frame to catch up.
+    skips++;
+    return;
+  }
+
+  const pcm = new Int16Array(data);
+  const frames = pcm.length >> 1;
+  const buf = ctx.createBuffer(2, frames, RATE);
+  const L = buf.getChannelData(0), R = buf.getChannelData(1);
+  for (let i = 0, j = 0; i < frames; i++, j += 2) {
+    L[i] = pcm[j] / 32768;
+    R[i] = pcm[j + 1] / 32768;
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(out);
+  src.start(nextTime);
+  nextTime += frames / RATE;
+}
+
+$('vol').addEventListener('input', e => {
+  $('volVal').textContent = Math.round(e.target.value * 100) + '%';
+  if (out) out.gain.value = +e.target.value;
+});
+
+$('delay').addEventListener('input', e => {
+  target = e.target.value / 1000;
+  $('delayVal').textContent = e.target.value + ' ms';
+  nextTime = 0;
+  try { localStorage.setItem('delay', e.target.value); } catch {}
+});
+try {
+  const saved = localStorage.getItem('delay');
+  if (saved) { $('delay').value = saved; $('delay').dispatchEvent(new Event('input')); }
+} catch {}
+
+$('bg').addEventListener('change', () => { route(); nextTime = 0; });
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && ctx && ctx.state !== 'running') {
+    ctx.resume().catch(() => {}).finally(updateButton);
+  }
+});
+
+let last = performance.now();
+setInterval(() => {
+  const t = performance.now();
+  $('sRate').textContent = started ? Math.round(bytes * 8 / (t - last)) : '–';
+  bytes = 0; last = t;
+  $('sBuf').textContent = ctx && nextTime ? Math.max(0, Math.round((nextTime - ctx.currentTime) * 1000)) : '–';
+  $('sUnder').textContent = gaps;
+  $('sDrop').textContent = skips;
+}, 500);
+</script>
+</body>
+</html>
